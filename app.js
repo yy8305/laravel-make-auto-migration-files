@@ -1,4 +1,4 @@
-// load module and init project
+// load module and settings
 const fs = require('fs');
 const path = require('path');
 const mysql = require('mysql');
@@ -9,149 +9,58 @@ const readline = require('readline').createInterface({
 });
 const util = require('util');
 const { resolve } = require('path');
-const question = util.promisify(readline.question).bind(readline);
-async function readInput(quest) {
-    try {
-        const answer = await question(quest);
-        return answer;
-    } catch (err) {
-        console.error('Question rejected', err);
-    }
-}
 
+// global variable init
 const contents_frame = fs.readFileSync(path.resolve(__dirname, 'frame.php'),'utf-8');
 const tab = '            ';
 let dbHostname = '';
+let dbPort = 3306;
 let dbUser = '';
 let dbPassword = '';
 let dbDatabase = '';
 let connection = null;
+const question = util.promisify(readline.question).bind(readline);
 
-const dbInit = async () => {
-    dbHostname = await readInput('database hostname : ');
-    dbUser = await readInput('database user : ');
-    dbPassword = await readInput('database password : ');
-    dbDatabase = await readInput('database database name : ');
+// input db info
+const dbVarInit = async () => {
+    dbHostname = await question('database hostname : ');
+    dbPort = await question('database port : ');
+    dbUser = await question('database user : ');
+    dbPassword = await question('database password : ');
+    dbDatabase = await question('database database name : ');
 
     readline.close();
 };
 
-const dbConnect = async () => {
-    connection = mysql.createConnection({
-        host     : dbHostname,
-        port     : 3306,
-        user     : dbUser,
-        password : dbPassword,
-        database : dbDatabase
-    });
-    connection.connect();
-}
-
-const dbDisConnect = async () => {
-    console.log('connection disconnet...');
-    connection.end();
-}
-
-const makeMigrationFile = (table_name, add_column) => {
+// db connect
+const dbConnect = () => {
     return new Promise((resolve, reject) => {
-        try {
-            let fileName = moment().format('YYYY_MM_DD_hhmmss') + '_create_' + table_name + '_table.php';
-            let contents = contents_frame.replaceAll('$$add_column$$',add_column).replaceAll('$$table_name$$',table_name);
-            fs.writeFileSync(path.resolve(__dirname, fileName), contents);
-            resolve(true);
-        } catch (err) {
-            console.error(err);
-            reject(false);
-        }
-    })
-}
-
-const readTableList = (tables) => {
-    return new Promise((resolve, reject) => {
-        resolve(tables);
-    });
-}
-
-const readColumnList = (tables) => {
-    let str = '';
-    return new Promise((resolve, reject) => {
-        for(table of tables){
-            let tableName = table['Name'];
-
-            str = '\n';
-            dbQuery('SHOW FULL COLUMNS FROM `'+ tableName +'`;').then((columns) => {
-                for(column of columns){
-                    let name = column['Field'];
-                    let type = column['Type'];
-                    let type_len = '';
-                    let nullable = '';
-                    let col_default = '';
-                    let col_key = column['Key'];
-
-                    if(col_key == 'PRI'){
-                        str += tab + `$table->id('${name}');\n`;
-                        continue;
-                    }
-
-                    if(type.indexOf('(') > -1){
-                        let type_split = type.split('(');
-                        type = type_split[0];
-                        type_len = ', ' + type_split[1].split(')')[0].toString();
-                    }
-                    if(type == 'tinyint'){
-                        type = 'tinyInteger';
-                    }else if(type == 'int'){
-                        type = 'integer';
-                    }else if(type == 'bigint'){
-                        type = 'bigInteger';
-                    }else if(type == 'char'){
-                        type = 'char';
-                    }else if(type == 'varchar'){
-                        type = 'string';
-                    }else if(type == 'date'){
-                        type = 'date';
-                    }else if(type == 'datetime'){
-                        type = 'dateTime';
-                    }else if(type == 'mediumtext'){
-                        type = 'mediumText';
-                    }else if(type == 'enum'){
-                        type = 'enum';
-                    }
-
-                    if(column['Null'] == 'YES'){
-                        nullable = '->nullable()';
-                    }
-
-                    if(column['Default'] != null && typeof(column['Default']) != 'number'){
-                        if(column['Default'].trim().length > 0){
-                            col_default = `->default('${column['Default'].replaceAll('\'','\\\'')}')`;
-                        }
-                    }else{
-                        col_default = `->default(${column['Default']})`;
-                    }
-                    
-                    str += tab + `$table->${type}('${name}'${type_len})${nullable}${col_default};\n`;
-                }
-
-                makeMigrationFile(tableName, str).then(() => {
-                    str = '\n';
-                });
-            });
-
-            
-        }
-        
+        connection = mysql.createConnection({
+            host     : dbHostname,
+            port     : parseInt(dbPort),
+            user     : dbUser,
+            password : dbPassword,
+            database : dbDatabase
+        });
+        connection.connect();
         resolve(true);
     })
 }
 
+// db dis connect
+const dbDisConnect = () => {
+    console.log('database connection disconnet...');
+    connection.end();
+}
 
+// db query excute
 const dbQuery = (query) => {
-    console.log('dbQuery..');
     return new Promise((resolve, reject) => {
         connection.query(query, 
             (error, results, fields) => {
                 if (error){
+                    dbDisConnect();
+                    reject(false);
                     throw error;
                 }
         
@@ -161,15 +70,117 @@ const dbQuery = (query) => {
     });
 }
 
+// make laravel migration query
+const makeMigrationQuery = async (tableName) => {
+    let tempStr = '\n';
+    let columns = await dbQuery('SHOW FULL COLUMNS FROM `'+ tableName +'`;');
 
+    return new Promise((resolve, reject) => {
+        for(column of columns){
+            let name = column['Field'];
+            let type = column['Type'];
+            let type_len = '';
+            let nullable = '';
+            let col_default = '';
+            let col_key = column['Key'];
+            let type_add_val = '';
+    
+            //validate key
+            if(col_key == 'PRI'){
+                tempStr += tab + `$table->id('${name}');\n`;
+                continue;
+            }
+    
+            //validate data type
+            if(type.indexOf('(') > -1){
+                let type_split = type.split('(');
+                type = type_split[0];
+                tmp_type_val = type_split[1].split(')')[0].toString();
+                type_len = '->length(' + tmp_type_val + ')';
+                
+                if(type == 'enum'){
+                    type_add_val = ',[' + tmp_type_val + ']';
+                    type_len = '';
+                }
+            }
+            if(type == 'tinyint'){
+                type = 'tinyInteger';
+            }else if(type == 'int'){
+                type = 'integer';
+            }else if(type == 'bigint'){
+                type = 'bigInteger';
+            }else if(type == 'char'){
+                type = 'char';
+            }else if(type == 'varchar'){
+                type = 'string';
+            }else if(type == 'date'){
+                type = 'date';
+            }else if(type == 'datetime'){
+                type = 'dateTime';
+            }else if(type == 'mediumtext'){
+                type = 'mediumText';
+            }else if(type == 'enum'){
+                type = 'enum';
+            }
+    
+            // check nullbase
+            if(column['Null'] == 'YES'){
+                nullable = '->nullable()';
+            }
+    
+            // validate default value
+            if( column['Null'] == 'YES' && column['Default'] != '' && (column['Default'] == null || column['Default'].toString().length > 0) ){
+                if(column['Default'] == null){
+                    col_default = `->default(NULL)`;
+                }else{
+                    col_default = `->default('${column['Default'].replaceAll('\'','\\\'')}')`;
+                }
+                
+            }
+            
+            tempStr += tab + `$table->${type}('${name}'${type_add_val})${type_len}${nullable}${col_default};\n`;
+        }
+
+        resolve(tempStr);
+    });
+
+}
+
+// make migration file(*.php)
+const makeMigrationFile = (tableName, columnQuery) => {
+    return new Promise((resolve, reject) => {
+        try {
+            let fileName = moment().format('YYYY_MM_DD_hhmmss') + '_create_' + tableName + '_table.php';
+            let contents = contents_frame.replaceAll('$$add_column$$', columnQuery).replaceAll('$$table_name$$',tableName);
+            fs.writeFileSync(path.resolve(__dirname, fileName), contents);
+            resolve(true);
+        } catch (err) {
+            console.error(err);
+            reject(false);
+        }
+    })
+}
+
+// make query & migration file wrapper function
+const makeMigrationStart = async (table) => {
+    let migrationQuery = await makeMigrationQuery(table['Name']);
+    await makeMigrationFile(table['Name'], migrationQuery);
+}
+
+// wrapper function
+const makeMigration = async () => {
+    let str = '';
+    let tableList = await dbQuery('SHOW TABLE STATUS;');
+    for(table of tableList){
+        makeMigrationStart(table);
+    }
+}
+
+// this project main code
 const main = async () => {
-    // input db config
-    await dbInit();
-
-    // read database
+    await dbVarInit();
     await dbConnect();
-    let tableList = await readTableList(await dbQuery('SHOW TABLE STATUS;'));
-    await readColumnList(tableList);
-    await dbDisConnect();
+    await makeMigration();
+    dbDisConnect();
 }
 main();
